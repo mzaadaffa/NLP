@@ -1,0 +1,208 @@
+import numpy as np
+import pandas as pd
+import re
+import nltk.data
+import sys
+import nltk
+nltk.download('punkt')
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.decomposition import NMF
+from Sastrawi.StopWordRemover.StopWordRemoverFactory import StopWordRemoverFactory
+from Sastrawi.Stemmer.StemmerFactory import StemmerFactory
+np.seterr(divide='ignore', invalid='ignore')
+def preProcess(konten, judul):
+
+#sentence segmentation & case folding
+    a = konten
+    a = a.replace(', ',',')
+    a = a.replace(',',', ')
+    #teks = a.split(' ', 3)[3]
+    teks = a
+    teks = teks.replace('www.','')
+    teks = teks.replace('.com','com')
+    teks = teks.replace('.COM','COM')
+    teks = teks.replace('.','. ')
+    teks = teks.encode("ascii", "ignore")
+    teks = teks.decode("ascii")
+    teks = teks.replace('\n','')
+
+    #sentence segmentation
+    import nltk.data
+    tokenizer = nltk.data.load('tokenizers/punkt/english.pickle')
+    kalimat = tokenizer.tokenize(teks)
+
+    #case Folding
+    low = []
+    for x in kalimat:
+        a = re.sub(r'[^a-zA-Z0-9\s]', ' ', x)
+        a = ''.join([i for i in a if not i.isdigit()])
+        a = a.lower()
+        low.append(a)
+
+#stopword removal
+    factory = StopWordRemoverFactory()
+    stopword = factory.create_stop_word_remover()
+    stopped = []
+    for s in low:
+        stop = stopword.remove(s)
+        stopped.append(stop)
+    nyoba = pd.DataFrame({'col':stopped})
+
+#stemming
+    factory1 = StemmerFactory()
+    stemmer = factory1.create_stemmer()
+    nyoba['col'] = nyoba['col'].apply(lambda x: stemmer.stem(x))
+    stemmed = nyoba['col'].tolist()
+    #Buat Dictionary untuk teks sebelum & setelah dilakukan preprocess (Belum tokenize)
+    dictionary = dict(zip(stemmed, kalimat))
+
+#preprocess buat judul
+    b = judul
+    b = b.encode("ascii", "ignore")
+    b = b.decode("ascii")
+    b = b.replace('\n','')
+    b = re.sub(r'[^a-zA-Z0-9\s]', ' ', b)
+    b = ''.join([i for i in b if not i.isdigit()])
+    b = b.lower()
+    b = stopword.remove(b)
+    b = stemmer.stem(b)
+
+    #buat dictionary untuk teks sebelum & setelah dilakukan preprocess (Belum tokenize)
+    dictionary = dict(zip(stemmed, kalimat))
+    
+    return dictionary, b
+    
+def kataKunci(kalimat, judul) :
+    a = len(judul.split())
+    vectorizer = CountVectorizer()
+    X = vectorizer.fit_transform(kalimat)
+    idx_to_word = np.array(vectorizer.get_feature_names())
+    nmf = NMF(n_components=1, solver="mu", init = "random",
+              beta_loss="frobenius", tol=1e-4) 
+    W = nmf.fit_transform(X)
+    H = nmf.components_
+    for i, topic in enumerate(H) :
+        keyword = idx_to_word[topic.argsort()[-a:]]
+    keyword = keyword.tolist()
+    katakunci = ' '.join(keyword)
+    return katakunci
+def cosineSim(a,b) :
+    dot_product = np.dot(a, b)
+    norm_a = np.linalg.norm(a)
+    norm_b = np.linalg.norm(b)
+    return dot_product / (norm_a * norm_b)
+def bestSentence(sentences, query):
+    best_sentence = None
+    maxVal = float("-inf")
+    
+    for sent in sentences:
+        kalimat = []
+        kalimat.append(sent)
+        kalimat.append(query)
+        
+        vectorizer = CountVectorizer()
+        tf = vectorizer.fit_transform(kalimat)
+        tf = tf.toarray()
+        tf_sent = tf[0]
+        tf_query = tf[1]
+        
+        similarity = cosineSim(tf_sent, tf_query)
+        
+        if similarity > maxVal:
+            best_sentence = sent
+            maxVal = similarity
+    
+    sentences.remove(best_sentence)
+    return best_sentence
+def MMR(Si, query, Sj, lamda):
+    
+    kalimat = []
+    kalimat.append(Si)
+    kalimat.append(query)
+        
+    vectorizer = CountVectorizer()
+    tf = vectorizer.fit_transform(kalimat)
+    tf = tf.toarray()
+    tf_Si = tf[0]
+    tf_query = tf[1]
+    
+    Sim1 = cosineSim(tf_Si, tf_query)
+    l_expr = lamda * Sim1
+    value = []
+
+    for sent in Sj:
+        kalimat1 = []
+        kalimat1.append(Si)
+        kalimat1.append(sent)
+        
+        vectorizer = CountVectorizer()
+        tf = vectorizer.fit_transform(kalimat1)
+        tf = tf.toarray()
+        tf_Si = tf[0]
+        tf_sent = tf[1]
+        
+        Sim2 = cosineSim(tf_Si, tf_sent)
+        value.append(Sim2)
+
+    r_expr = (1-lamda) * max(value)
+    MMR_SCORE = l_expr - r_expr
+
+    return MMR_SCORE
+def makeSummary(sentences, best_sentence, query, summary_length, lamda):
+    rangkuman = [best_sentence]
+    sum_len = len(rangkuman)
+    
+    while sum_len < summary_length :
+        MMRval = {}
+        
+        for sent in sentences:
+            MMRval[sent] = MMR(sent, query, rangkuman, lamda)
+        
+        maxmmr = max(MMRval, key=MMRval.get)
+        rangkuman.append(maxmmr)
+        sentences.remove(maxmmr)
+        sum_len = len(rangkuman)
+    
+    return rangkuman
+def gabung(rangkuman, dictionary):
+    summ_arr = []
+    for summ in rangkuman :
+        summ_arr.append(dictionary[summ])
+
+    summary = ' '.join(summ_arr)
+    
+    return summary
+from urllib.request import urlopen
+from bs4 import BeautifulSoup
+
+link = "https://itk.ac.id/index.php/teknik-mesin-itk-berkunjung-ke-teknik-mesin-dan-kkn-ppm-ugm/"
+
+html = urlopen(link).read()
+soup = BeautifulSoup(html, "lxml")
+
+judul = soup.find('h1').get_text()
+konten = soup.find('article').get_text()
+
+dictionary, title = preProcess(konten, judul)
+
+#mengambil teks berita dari dictionary
+teks = []
+for key, value in dictionary.items():
+    temp = key
+    teks.append(temp)
+    
+teks1 = teks.copy()
+kalimat = teks.copy()
+    
+query = kataKunci(teks, title) #mengambil kata kunci dengan metode NMF
+    
+    
+dariNMF = bestSentence(teks, query) #mengambil kalimat terbaik dengan query NMF dan cosinesim
+darijudul = bestSentence(teks1, title) #mengambil kalimat terbaik dengan query berdasarkan judul dan cosinesim
+    
+#mendapatkan kalimat dengan lamda 0.7 dan sebanyak 5 kalimat
+summary = makeSummary(teks, dariNMF, query, 0.7, 5) #mendapatkan n kalimat terbaik dengan MMR dan NMF
+summaryJudul = makeSummary(teks1, darijudul, title, 0.7, 5) #mendapatkan n kalimat terbaik dengan MMR
+    
+hasil = gabung(summary, dictionary) #rangkuman hasil NMF dan MMR
+hasilJudul = gabung(summaryJudul, dictionary) #rangkuman hasil MMR dengan query berdasarkan judul
